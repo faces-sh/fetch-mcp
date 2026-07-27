@@ -8,6 +8,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { RequestPayloadSchema, YouTubeTranscriptPayloadSchema } from "./types.js";
 import { Fetcher } from "./Fetcher.js";
+import { resolveArgs, wrapResult } from "./circuitBuffer.js";
 import process from "process";
 import { downloadLimit } from "./types.js";
 import pkg from "../package.json" with { type: "json" };
@@ -222,11 +223,14 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 const FETCH_TOOLS = new Set(["fetch_html", "fetch_json", "fetch_txt", "fetch_markdown", "fetch_readable"]);
 
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+  const { name } = request.params;
+  // Circuit: expand any @@hN@@ handle in the args before validation (Maestro's handle bus, no-op without the
+  // env), then park a large fetched result behind a handle on the way out so the next tool can wire it.
+  const args = await resolveArgs(request.params.arguments ?? {});
 
   if (name === "fetch_youtube_transcript") {
     const validatedArgs = YouTubeTranscriptPayloadSchema.parse(args);
-    return Fetcher.youtubeTranscript(validatedArgs);
+    return await wrapResult(await Fetcher.youtubeTranscript(validatedArgs));
   }
 
   if (!FETCH_TOOLS.has(name)) {
@@ -235,11 +239,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
   const validatedArgs = RequestPayloadSchema.parse(args);
 
-  if (name === "fetch_html") return Fetcher.html(validatedArgs);
-  if (name === "fetch_json") return Fetcher.json(validatedArgs);
-  if (name === "fetch_txt") return Fetcher.txt(validatedArgs);
-  if (name === "fetch_markdown") return Fetcher.markdown(validatedArgs);
-  return Fetcher.readable(validatedArgs);
+  if (name === "fetch_html") return await wrapResult(await Fetcher.html(validatedArgs));
+  if (name === "fetch_json") return await wrapResult(await Fetcher.json(validatedArgs));
+  if (name === "fetch_txt") return await wrapResult(await Fetcher.txt(validatedArgs));
+  if (name === "fetch_markdown") return await wrapResult(await Fetcher.markdown(validatedArgs));
+  return await wrapResult(await Fetcher.readable(validatedArgs));
 });
 
 async function main() {
