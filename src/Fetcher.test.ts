@@ -57,15 +57,10 @@ describe("Fetcher", () => {
       mockFetch.mockRejectedValueOnce(new Error("Network error"));
 
       const result = await Fetcher.html(mockRequest);
-      expect(result).toEqual({
-        content: [
-          {
-            type: "text",
-            text: "Failed to fetch https://example.com: Network error",
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toStartWith("[network_error] Could not fetch the page:");
+      expect(result.content[0].text).toContain("Network error");
+      expect(result.content[0].text).not.toContain("HTTP ");
     });
   });
 
@@ -88,15 +83,9 @@ describe("Fetcher", () => {
       mockFetch.mockRejectedValueOnce(new Error("Invalid JSON"));
 
       const result = await Fetcher.json(mockRequest);
-      expect(result).toEqual({
-        content: [
-          {
-            type: "text",
-            text: "Failed to fetch https://example.com: Invalid JSON",
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toStartWith("[network_error] Could not fetch the JSON:");
+      expect(result.content[0].text).toContain("Invalid JSON");
     });
   });
 
@@ -105,15 +94,9 @@ describe("Fetcher", () => {
       mockFetch.mockRejectedValueOnce(new Error("Parsing error"));
 
       const result = await Fetcher.txt(mockRequest);
-      expect(result).toEqual({
-        content: [
-          {
-            type: "text",
-            text: "Failed to fetch https://example.com: Parsing error",
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toStartWith("[network_error] Could not fetch the page as text:");
+      expect(result.content[0].text).toContain("Parsing error");
     });
   });
 
@@ -151,7 +134,7 @@ describe("Fetcher", () => {
 
       const result = await Fetcher.readable(mockRequest);
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("Failed to parse readable content");
+      expect(result.content[0].text).toStartWith("[unreadable_content] Could not read the article:");
     });
 
     it("should handle fetch errors", async () => {
@@ -159,7 +142,7 @@ describe("Fetcher", () => {
 
       const result = await Fetcher.readable(mockRequest);
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("Failed to fetch https://example.com: Network error");
+      expect(result.content[0].text).toStartWith("[network_error] Could not read the article:");
     });
   });
 
@@ -168,15 +151,9 @@ describe("Fetcher", () => {
       mockFetch.mockRejectedValueOnce(new Error("Conversion error"));
 
       const result = await Fetcher.markdown(mockRequest);
-      expect(result).toEqual({
-        content: [
-          {
-            type: "text",
-            text: "Failed to fetch https://example.com: Conversion error",
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toStartWith("[network_error] Could not fetch the page as Markdown:");
+      expect(result.content[0].text).toContain("Conversion error");
     });
   });
 
@@ -184,18 +161,21 @@ describe("Fetcher", () => {
     it("should block file:// URLs", async () => {
       const result = await Fetcher.html({ url: "file:///etc/passwd" });
       expect(result.isError).toBe(true);
+      expect(result.content[0].text).toStartWith("[blocked_url] ");
       expect(result.content[0].text).toContain('disallowed protocol "file:"');
     });
 
     it("should block data: URLs", async () => {
       const result = await Fetcher.html({ url: "data:text/html,<h1>hi</h1>" });
       expect(result.isError).toBe(true);
+      expect(result.content[0].text).toStartWith("[blocked_url] ");
       expect(result.content[0].text).toContain('disallowed protocol "data:"');
     });
 
     it("should block ftp: URLs", async () => {
       const result = await Fetcher.html({ url: "ftp://example.com/file" });
       expect(result.isError).toBe(true);
+      expect(result.content[0].text).toStartWith("[blocked_url] ");
       expect(result.content[0].text).toContain('disallowed protocol "ftp:"');
     });
 
@@ -348,7 +328,7 @@ describe("Fetcher", () => {
       });
 
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("No caption tracks found");
+      expect(result.content[0].text).toStartWith("[no_transcript] Could not fetch the transcript:");
     });
   });
 
@@ -409,7 +389,7 @@ describe("Fetcher", () => {
         lang: "en; rm -rf /",
       });
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("Invalid language code");
+      expect(result.content[0].text).toStartWith("[bad_request] Could not fetch the transcript:");
     });
 
     it("should reject lang with command substitution", async () => {
@@ -420,7 +400,7 @@ describe("Fetcher", () => {
         lang: "$(whoami)",
       });
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("Invalid language code");
+      expect(result.content[0].text).toStartWith("[bad_request] Could not fetch the transcript:");
     });
 
     it("should accept valid language codes", async () => {
@@ -508,7 +488,7 @@ describe("Fetcher", () => {
 
       const result = await Fetcher.html(mockRequest);
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("Response too large");
+      expect(result.content[0].text).toStartWith("[response_too_large] Could not fetch the page:");
     });
 
     it("should allow responses within size limit", async () => {
@@ -531,30 +511,18 @@ describe("Fetcher", () => {
       });
 
       const result = await Fetcher.html(mockRequest);
-      expect(result).toEqual({
-        content: [
-          {
-            type: "text",
-            text: "Failed to fetch https://example.com: HTTP error: 404",
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      const lines = result.content[0].text.split("\n");
+      expect(lines[0]).toBe("[http_404] Could not fetch the page: the site has no page at that address.");
+      expect(lines[1]).toStartWith("HTTP 404");
     });
 
     it("should handle unknown errors", async () => {
       mockFetch.mockRejectedValueOnce("Unknown error");
 
       const result = await Fetcher.html(mockRequest);
-      expect(result).toEqual({
-        content: [
-          {
-            type: "text",
-            text: "Failed to fetch https://example.com: Unknown error",
-          },
-        ],
-        isError: true,
-      });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toStartWith("[network_error] Could not fetch the page:");
     });
 
     it("should produce a string text field when response processing throws a non-Error", async () => {
@@ -566,7 +534,7 @@ describe("Fetcher", () => {
       const result = await Fetcher.html(mockRequest);
       expect(result.isError).toBe(true);
       expect(typeof result.content[0].text).toBe("string");
-      expect(result.content[0].text).toBe("string error");
+      expect(result.content[0].text).toBe("[internal_error] Could not fetch the page: string error");
     });
   });
 });

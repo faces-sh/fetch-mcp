@@ -150,7 +150,7 @@ describe("Fetcher — fixture tests", () => {
       mockFetchWith("<html><body></body></html>");
       const result = await Fetcher.readable(req({ max_length: 0 }));
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("Failed to parse readable content");
+      expect(result.content[0].text).toStartWith("[unreadable_content] Could not read the article:");
     });
 
     it("respects max_length", async () => {

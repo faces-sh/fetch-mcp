@@ -5,6 +5,14 @@ import is_ip_private from "private-ip";
 import dns from "node:dns";
 import { RequestPayload, YouTubeTranscriptPayload, downloadLimit, maxResponseBytes } from "./types.js";
 import { YouTubeTranscript } from "./YouTubeTranscript.js";
+import {
+  ERROR_BODY_READ_LIMIT,
+  FetchFailure,
+  redact,
+  resultFor,
+  statusLine,
+  transportFailure,
+} from "./envelope.js";
 
 export class Fetcher {
   private static applyLengthLimits(text: string, maxLength: number, startIndex: number): string {
@@ -19,8 +27,9 @@ export class Fetcher {
   private static validateUrl(url: string): void {
     const parsedUrl = new URL(url);
     if (parsedUrl.protocol !== 'http:' && parsedUrl.protocol !== 'https:') {
-      throw new Error(
-        `Fetcher blocked URL with disallowed protocol "${parsedUrl.protocol}". Only HTTP and HTTPS are allowed.`,
+      throw new FetchFailure(
+        "blocked_url",
+        `the URL has a disallowed protocol "${parsedUrl.protocol}". Only HTTP and HTTPS are allowed.`,
       );
     }
     const hostname = parsedUrl.hostname;
@@ -28,8 +37,9 @@ export class Fetcher {
       ? hostname.slice(1, -1)
       : hostname;
     if (bareHostname === 'localhost' || is_ip_private(bareHostname)) {
-      throw new Error(
-        `Fetcher blocked request to private address "${bareHostname}". This prevents SSRF attacks where a local MCP server could access privileged internal services.`,
+      throw new FetchFailure(
+        "blocked_private_address",
+        `the request was to private address "${bareHostname}". This prevents SSRF attacks where a local MCP server could access privileged internal services.`,
       );
     }
   }
@@ -42,13 +52,14 @@ export class Fetcher {
     try {
       const { address } = await dns.promises.lookup(bareHostname);
       if (is_ip_private(address)) {
-        throw new Error(
-          `Fetcher blocked request: hostname "${bareHostname}" resolved to private IP "${address}". This prevents DNS rebinding SSRF attacks.`,
+        throw new FetchFailure(
+          "blocked_private_address",
+          `hostname "${bareHostname}" resolved to private IP "${address}". This prevents DNS rebinding SSRF attacks.`,
         );
       }
     } catch (e) {
-      if (e instanceof Error && e.message.includes('Fetcher blocked')) throw e;
-      // DNS lookup failures (e.g. non-resolvable hostnames) are not SSRF — let fetch handle them
+      if (e instanceof FetchFailure) throw e;
+      // DNS lookup failures (e.g. non-resolvable hostnames) are not SSRF - let fetch handle them
     }
   }
 
@@ -72,10 +83,10 @@ export class Fetcher {
         ...(proxy ? { proxy } : {}),
       } as RequestInit);
     } catch (e: unknown) {
-      if (e instanceof Error) {
-        throw new Error(`Failed to fetch ${url}: ${e.message}`);
-      }
-      throw new Error(`Failed to fetch ${url}: Unknown error`);
+      if (e instanceof FetchFailure) throw e;
+      // No HTTP response happened here, so there is no status line to carry (rule 4). The code
+      // says which of the four cases it was and the underlying error's own words are the evidence.
+      throw transportFailure(e, url);
     }
 
     if (response.url && response.url !== url) {
@@ -84,15 +95,90 @@ export class Fetcher {
     }
 
     if (!response.ok) {
-      throw new Error(`Failed to fetch ${url}: HTTP error: ${response.status}`);
+      // The body is the ONLY thing that separates an expired key from a key that never had access,
+      // and this used to throw it away and keep the number. It travels with the failure now,
+      // uninterpreted, for whoever can actually act on it.
+      const body = await this.readErrorBody(response);
+      throw new FetchFailure(
+        `http_${response.status}`,
+        this.httpReason(response.status),
+        statusLine(response.status, (response as { statusText?: string }).statusText),
+        body,
+      );
     }
 
     const contentLength = response.headers?.get?.("content-length");
     if (contentLength && parseInt(contentLength, 10) > maxResponseBytes) {
-      throw new Error(`Response too large: ${contentLength} bytes exceeds ${maxResponseBytes} byte limit`);
+      throw new FetchFailure(
+        "response_too_large",
+        `the response is ${contentLength} bytes, over the ${maxResponseBytes} byte limit.`,
+        statusLine(response.status, (response as { statusText?: string }).statusText),
+      );
     }
 
     return response;
+  }
+
+  // What the four-hundreds and five-hundreds MEAN in plain words. Descriptions of what happened,
+  // never advice about what to do next (rule 7): this server does not know whose credential it was,
+  // nor whether the caller can do anything about it.
+  private static readonly HTTP_REASONS: Record<number, string> = {
+    400: "the site rejected the request as malformed.",
+    401: "the site refused the request as unauthenticated.",
+    403: "the site refused access to that page.",
+    404: "the site has no page at that address.",
+    405: "the site does not allow that method on this resource.",
+    408: "the site timed out waiting for the request.",
+    410: "the page is gone from the site.",
+    429: "the site is rate limiting this client.",
+    451: "the site refused the page for legal reasons.",
+    500: "the site failed while producing the page.",
+    502: "the site got a bad answer from upstream.",
+    503: "the site is unavailable.",
+    504: "the site timed out upstream.",
+  };
+
+  private static httpReason(status: number): string {
+    const known = this.HTTP_REASONS[status];
+    if (known) return known;
+    if (status >= 500) return "the site failed.";
+    if (status >= 400) return "the site rejected the request.";
+    return "the site answered with something that could not be used.";
+  }
+
+  /**
+   * Read an error response's body, bounded.
+   *
+   * Bounded because a failing site is exactly the one likely to answer with a megabyte of HTML,
+   * and this is the unhappy path: nothing here should be able to hang or exhaust memory. What
+   * comes back is the site's own words, uninterpreted, and it is capped again at 4000 characters
+   * when the envelope is assembled.
+   */
+  private static async readErrorBody(response: Response): Promise<string> {
+    try {
+      if (!response.body) {
+        const text = await response.text?.();
+        return typeof text === "string" ? text.slice(0, ERROR_BODY_READ_LIMIT) : "";
+      }
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let text = "";
+      try {
+        while (text.length < ERROR_BODY_READ_LIMIT) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          text += decoder.decode(value, { stream: true });
+        }
+        text += decoder.decode();
+      } finally {
+        reader.cancel();
+      }
+      return text.slice(0, ERROR_BODY_READ_LIMIT);
+    } catch {
+      // A body we cannot read is no reason to lose the status we already have. The envelope
+      // simply carries no third line, which is honest: there was nothing to reproduce.
+      return "";
+    }
   }
 
   private static async readResponseText(response: Response): Promise<string> {
@@ -107,7 +193,10 @@ export class Fetcher {
         if (done) break;
         bytesRead += value.byteLength;
         if (bytesRead > maxResponseBytes) {
-          throw new Error(`Response too large: exceeded ${maxResponseBytes} byte limit while reading`);
+          throw new FetchFailure(
+            "response_too_large",
+            `the response went over the ${maxResponseBytes} byte limit while being read.`,
+          );
         }
         result += decoder.decode(value, { stream: true });
       }
@@ -132,10 +221,7 @@ export class Fetcher {
 
       return { content: [{ type: "text", text: html }], isError: false };
     } catch (error) {
-      return {
-        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-        isError: true,
-      };
+      return resultFor(error, "fetch the page");
     }
   }
 
@@ -143,7 +229,18 @@ export class Fetcher {
     try {
       const response = await this._fetch(requestPayload);
       const text = await this.readResponseText(response);
-      const json = JSON.parse(text);
+      let json: unknown;
+      try {
+        json = JSON.parse(text);
+      } catch (e) {
+        // A 200 that is not JSON is a failure of THIS tool, and the body is the evidence for it.
+        throw new FetchFailure(
+          "invalid_response",
+          `the site answered with something that is not JSON: ${e instanceof Error ? e.message : String(e)}`,
+          statusLine(response.status, (response as { statusText?: string }).statusText),
+          text,
+        );
+      }
       let jsonString = JSON.stringify(json);
       
       // Apply length limits
@@ -158,10 +255,7 @@ export class Fetcher {
         isError: false,
       };
     } catch (error) {
-      return {
-        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-        isError: true,
-      };
+      return resultFor(error, "fetch the JSON");
     }
   }
 
@@ -193,10 +287,7 @@ export class Fetcher {
         isError: false,
       };
     } catch (error) {
-      return {
-        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-        isError: true,
-      };
+      return resultFor(error, "fetch the page as text");
     }
   }
 
@@ -205,7 +296,10 @@ export class Fetcher {
     lang: string,
   ): Promise<{ xml: string; lang: string; langName: string }> {
     if (!/^[a-zA-Z0-9-]+$/.test(lang)) {
-      throw new Error(`Invalid language code: "${lang}". Only letters, digits, and hyphens are allowed.`);
+      throw new FetchFailure(
+        "bad_request",
+        `the language code "${lang}" is not valid. Only letters, digits, and hyphens are allowed.`,
+      );
     }
     const { execFileSync, execSync } = await import("child_process");
     const tmpDir = execSync("mktemp -d", { encoding: "utf-8" }).trim();
@@ -224,7 +318,9 @@ export class Fetcher {
       const { readdirSync, readFileSync } = await import("fs");
       const files = readdirSync(tmpDir).filter((f: string) => f.endsWith(".srv1"));
       if (files.length === 0) {
-        throw new Error("yt-dlp did not produce subtitle files");
+        // Coded so the caller above can tell "yt-dlp found nothing" (fall back to the direct
+        // path) from "the request was refused" (do not).
+        throw new FetchFailure("no_transcript", "yt-dlp produced no subtitle files.");
       }
       const file = files[0];
       const xml = readFileSync(`${tmpDir}/${file}`, "utf-8");
@@ -248,6 +344,9 @@ export class Fetcher {
     const lang = requestPayload.lang ?? "en";
     const track =
       tracks.find((t: any) => t.languageCode === lang) ?? tracks[0];
+    if (!track || typeof track.baseUrl !== "string") {
+      throw new FetchFailure("no_transcript", "the video lists no usable caption track.");
+    }
 
     const captionUrl = track.baseUrl + (track.baseUrl.includes("fmt=") ? "" : "&fmt=srv1");
     const captionResponse = await this._fetch({
@@ -286,11 +385,17 @@ export class Fetcher {
       if (await this.checkYtDlp()) {
         // Validate lang before attempting yt-dlp — this is a security check that must not be swallowed
         if (!/^[a-zA-Z0-9-]+$/.test(lang)) {
-          throw new Error(`Invalid language code: "${lang}". Only letters, digits, and hyphens are allowed.`);
+          throw new FetchFailure(
+            "bad_request",
+            `the language code "${lang}" is not valid. Only letters, digits, and hyphens are allowed.`,
+          );
         }
         try {
           result = await this.fetchTranscriptViaYtDlp(requestPayload.url, lang);
-        } catch {
+        } catch (e) {
+          // yt-dlp not producing captions is not a failure while the direct path is still open.
+          // A blocked or malformed request is, and must not be lost to the fallback.
+          if (e instanceof FetchFailure && e.code !== "no_transcript") throw e;
           result = await this.fetchTranscriptDirect(requestPayload);
         }
       } else {
@@ -309,10 +414,7 @@ export class Fetcher {
 
       return { content: [{ type: "text", text: transcript }], isError: false };
     } catch (error) {
-      return {
-        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-        isError: true,
-      };
+      return resultFor(error, "fetch the transcript");
     }
   }
 
@@ -326,7 +428,7 @@ export class Fetcher {
       const article = reader.parse();
 
       if (!article) {
-        throw new Error("Failed to parse readable content from the page");
+        throw new FetchFailure("unreadable_content", "the page has no article content to read.");
       }
 
       const turndownService = new TurndownService();
@@ -340,10 +442,7 @@ export class Fetcher {
 
       return { content: [{ type: "text", text: content }], isError: false };
     } catch (error) {
-      return {
-        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-        isError: true,
-      };
+      return resultFor(error, "read the article");
     }
   }
 
@@ -363,10 +462,7 @@ export class Fetcher {
 
       return { content: [{ type: "text", text: markdown }], isError: false };
     } catch (error) {
-      return {
-        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
-        isError: true,
-      };
+      return resultFor(error, "fetch the page as Markdown");
     }
   }
 }
