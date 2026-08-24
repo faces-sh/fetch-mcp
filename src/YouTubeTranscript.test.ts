@@ -11,7 +11,7 @@ describe("YouTubeTranscript", () => {
 
     it("throws when ytInitialPlayerResponse is not found", () => {
       expect(() => YouTubeTranscript.extractPlayerResponse("<html></html>")).toThrow(
-        "Could not find ytInitialPlayerResponse",
+        "the page did not contain YouTube's player data",
       );
     });
   });
@@ -34,7 +34,7 @@ describe("YouTubeTranscript", () => {
 
     it("throws when no caption tracks exist", () => {
       expect(() => YouTubeTranscript.getCaptionTracks({})).toThrow(
-        "No caption tracks found",
+        "the video has no caption tracks",
       );
     });
 
@@ -47,7 +47,7 @@ describe("YouTubeTranscript", () => {
         },
       };
       expect(() => YouTubeTranscript.getCaptionTracks(playerResponse)).toThrow(
-        "No caption tracks found",
+        "the video has no caption tracks",
       );
     });
   });

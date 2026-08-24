@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { Fetcher } from "./Fetcher.js";
+import { redact } from "./envelope.js";
 import type { RequestPayload, YouTubeTranscriptPayload } from "./types.js";
 import pkg from "../package.json" with { type: "json" };
 
@@ -66,7 +67,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       process.exit(1);
     }
   } catch {
-    process.stderr.write(`Invalid URL: ${url}\n`);
+    process.stderr.write(`Invalid URL: ${redact(url)}\n`);
     process.exit(1);
   }
 

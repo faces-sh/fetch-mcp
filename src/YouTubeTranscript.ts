@@ -1,8 +1,10 @@
+import { FetchFailure } from "./envelope.js";
+
 export class YouTubeTranscript {
   static extractPlayerResponse(html: string): unknown {
     const match = html.match(/ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
     if (!match) {
-      throw new Error("Could not find ytInitialPlayerResponse in page HTML");
+      throw new FetchFailure("no_transcript", "the page did not contain YouTube's player data.");
     }
     return JSON.parse(match[1]);
   }
@@ -11,7 +13,7 @@ export class YouTubeTranscript {
     const tracks =
       playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
     if (!Array.isArray(tracks) || tracks.length === 0) {
-      throw new Error("No caption tracks found for this video");
+      throw new FetchFailure("no_transcript", "the video has no caption tracks.");
     }
     return tracks;
   }

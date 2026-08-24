@@ -60,6 +60,10 @@ export async function resolveArgs(args: any): Promise<any> {
 export async function wrapResult(result: any): Promise<any> {
   const c = cfg();
   if (!c || !result || !Array.isArray(result.content)) return result;
+  // A FAILURE is never parked. Its whole value is being readable where it lands, and the envelope
+  // contract says the code leads the text with nothing before it: prepending a circuit tag to an
+  // error hid the code behind 130 characters of instructions about a payload that is not there.
+  if (result.isError) return result;
   const first = result.content[0];
   if (!first || first.type !== "text" || typeof first.text !== "string" || first.text.length < THRESHOLD) {
     return result;
